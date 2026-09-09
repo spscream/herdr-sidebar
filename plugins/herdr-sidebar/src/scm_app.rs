@@ -29,7 +29,8 @@ use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::suggest;
 use herdr_sidebar::ui::{
     TitleAction, activity_icons, branch_icon, draw_scrollbar, gear_icon, hits,
-    hits_collapse_button, hover_style, icon_style as ui_icon_style, keep_visible_scroll, palette,
+    COLLAPSED_COLS, draw_collapsed_strip, hits_collapse_button, hover_style,
+    icon_style as ui_icon_style, keep_visible_scroll, palette,
     selection_style, set_color_theme, sibling_panes_of, sparkle_icon, status_color,
     title_action_spans, title_actions_visible, title_actions_width, truncate_to, within,
     wrap_footer_message, wrap_hints,
@@ -41,6 +42,11 @@ const DRAWER_LIMIT: usize = 30;
 /// How long two clicks on the same row still count as a double click (to pin
 /// a diff/show tab), matching the file explorer.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(450);
+
+/// How often a docked view asks whether its tab is an orphaned preview tab.
+/// Two socket round trips, and only in the state that can be one, so this is
+/// far cheaper than the interval suggests.
+const ORPHAN_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Focus {
@@ -586,6 +592,8 @@ pub struct App {
     last_preview: Option<(String, herdr_sidebar::viewer::PreviewTarget)>,
     page: usize,
     last_width: u16,
+    last_orphan_check: std::time::Instant,
+    collapsed: bool,
     /// Whole tab area width from the last layout snapshot. Divider-only
     /// resizes leave this unchanged and are therefore respected.
     last_layout_width: Option<i64>,
@@ -696,6 +704,8 @@ impl App {
             last_preview: None,
             page: 20,
             last_width: sidebar_state.sidebar_width,
+            last_orphan_check: std::time::Instant::now(),
+            collapsed: false,
             last_layout_width,
             last_height: 24,
             sidebar_state,
@@ -760,19 +770,79 @@ impl App {
         }
     }
 
-    /// Hide the sidebar: snooze this tab (so the quiet ensure hook doesn't
-    /// immediately re-dock a fresh one) and close our own pane. The herdr
-    /// prefix+b keybinding (→ the toggle action) brings it back.
-    fn hide(&mut self) {
+    /// True while this view is showing the collapsed strip.
+    ///
+    /// Stored rather than derived from the width: herdr will not narrow a pane
+    /// past a tenth of the tab, so a collapsed pane on a wide window is as
+    /// wide as an expanded one on a narrow window, and no width threshold can
+    /// tell the two apart.
+    fn collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    /// Shrink the pane to a strip. Deliberately not a close: a closed pane can
+    /// only be brought back through the plugin's "Toggle sidebar" action,
+    /// which is invisible from inside the pane the user just collapsed.
+    fn collapse(&mut self) {
         let Some(ctl) = &self.pane_ctl else { return };
-        if let Ok(json) = herdr_sidebar::ipc::call_text("pane.list", serde_json::json!({})) {
-            let tab = herdr_sidebar::launch::tab_of(&json, &ctl.pane_id);
-            herdr_sidebar::snooze::set(&herdr_sidebar::snooze::dir(), &tab);
-        }
-        let _ = herdr_sidebar::ipc::call_text(
-            "pane.close",
-            serde_json::json!({ "pane_id": ctl.pane_id }),
+        ctl.resize_to(
+            self.last_width,
+            COLLAPSED_COLS,
+            self.sidebar_state.dock_right,
         );
+        self.collapsed = true;
+    }
+
+    /// Give the pane its configured width back.
+    fn expand(&mut self) {
+        let Some(ctl) = &self.pane_ctl else { return };
+        ctl.resize_to(
+            self.last_width,
+            self.sidebar_state.sidebar_width,
+            self.sidebar_state.dock_right,
+        );
+        self.collapsed = false;
+    }
+
+    fn toggle_collapsed(&mut self) {
+        if self.collapsed() {
+            self.expand();
+        } else {
+            self.collapse();
+        }
+    }
+
+    /// Close the pane this view runs in. The pane is a shell, so quitting the
+    /// TUI without this leaves a bare prompt where the sidebar was.
+    pub fn close_own_pane(&self) {
+        let Some(ctl) = &self.pane_ctl else { return };
+        herdr_sidebar::snooze::hide_pane(&ctl.pane_id);
+    }
+
+    /// Close a preview tab that lost its editor pane, by closing the only pane
+    /// left in it -- this one. Checked on a timer rather than on an event
+    /// because nothing tells a pane that a sibling went away.
+    fn close_orphaned_preview_tab(&mut self) {
+        if self.last_orphan_check.elapsed() < ORPHAN_CHECK_EVERY {
+            return;
+        }
+        self.last_orphan_check = std::time::Instant::now();
+        let Some(ctl) = &self.pane_ctl else { return };
+        let Ok(panes) = herdr_sidebar::ipc::call_text("pane.list", serde_json::json!({})) else {
+            return;
+        };
+        if !herdr_sidebar::launch::alone_in_tab(&panes, &ctl.pane_id) {
+            return;
+        }
+        let Ok(tabs) = herdr_sidebar::ipc::call_text("tab.list", serde_json::json!({})) else {
+            return;
+        };
+        if herdr_sidebar::launch::orphaned_preview_tab(&panes, &tabs, &ctl.pane_id) {
+            let _ = herdr_sidebar::ipc::call_text(
+                "pane.close",
+                serde_json::json!({ "pane_id": ctl.pane_id }),
+            );
+        }
     }
 
     /// Re-read every repo's git status (this is the change auto-detection —
@@ -845,6 +915,7 @@ impl App {
     /// Periodic timer tick: retry repo discovery if we started outside one,
     /// pick up external changes, and collect finished ✧ suggestion / sync runs.
     pub fn tick(&mut self) {
+        self.close_orphaned_preview_tab();
         let shared = sidebar::load_state();
         self.sidebar_state.git_deco = shared.git_deco;
         self.sidebar_state.dock_right = shared.dock_right;
@@ -912,6 +983,11 @@ impl App {
 
     pub fn on_resize(&mut self, width: u16) {
         self.last_width = width;
+        // A divider dragged back out to the configured width is the user
+        // asking for the panel, not for a very wide strip.
+        if self.collapsed && width >= self.sidebar_state.sidebar_width {
+            self.collapsed = false;
+        }
         if let Some(ctl) = &self.pane_ctl {
             let layout_width = ctl.layout_width();
             let surrounding_changed = self
@@ -919,7 +995,9 @@ impl App {
                 .zip(layout_width)
                 .is_some_and(|(before, now)| before != now);
             self.last_layout_width = layout_width.or(self.last_layout_width);
-            if surrounding_changed {
+            // Re-pinning a collapsed pane would expand it behind the user's
+            // back the first time the terminal window changes size.
+            if surrounding_changed && !self.collapsed {
                 ctl.resize_preferred(
                     width,
                     self.sidebar_state.sidebar_width,
@@ -1212,7 +1290,7 @@ impl App {
             KeyCode::Char('S') => self.sync_changes(),
             KeyCode::Char('o') => self.open_selected_diff(),
             KeyCode::Char('m') => self.open_menu_for_selection(),
-            KeyCode::Char('b') => self.hide(),
+            KeyCode::Char('b') => self.toggle_collapsed(),
             KeyCode::Char('1') => return self.switch_to(View::Explorer),
             KeyCode::Char('2') => return self.switch_to(View::SourceControl),
             _ => {}
@@ -1228,6 +1306,16 @@ impl App {
         self.mouse_pos = Some((mouse.column, mouse.row));
         if self.overlay.is_some() {
             self.overlay_mouse(mouse);
+            return None;
+        }
+        // The strip has no rows and no buttons: the whole of it is the way
+        // back. This runs before every other hit test, which would otherwise
+        // read hits at strip coordinates as hits on the panel the pane no
+        // longer shows.
+        if self.collapsed() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.expand();
+            }
             return None;
         }
         match mouse.kind {
@@ -1251,7 +1339,7 @@ impl App {
     fn left_click(&mut self, mouse: MouseEvent) -> Option<Exit> {
         self.flash = None;
         if hits_collapse_button(mouse.column, mouse.row, self.last_width, self.last_height) {
-            self.hide();
+            self.collapse();
             return None;
         }
         let (x, y) = (mouse.column, mouse.row);
@@ -2859,6 +2947,10 @@ impl App {
         let area = frame.area();
         self.last_width = area.width;
         self.last_height = area.height;
+        if self.collapsed() {
+            draw_collapsed_strip(frame, area, activity_icons(self.theme).1);
+            return;
+        }
 
         if self.repos.is_empty() {
             let text = format!(

@@ -287,6 +287,9 @@ fn run_explorer(
             if let Some(exit) = exit {
                 if exit == Exit::Quit {
                     app.clear_identity();
+                    // The pane is a shell that was told to run this TUI, so
+                    // exiting alone would leave a bare prompt behind.
+                    app.close_own_pane();
                 }
                 return Ok(exit);
             }
@@ -337,6 +340,9 @@ fn run_scm(
                 }
                 if exit == Exit::Quit {
                     app.clear_identity();
+                    // The pane is a shell that was told to run this TUI, so
+                    // exiting alone would leave a bare prompt behind.
+                    app.close_own_pane();
                 }
                 return Ok(exit);
             }

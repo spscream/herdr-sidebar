@@ -659,6 +659,62 @@ pub fn workspace_of(pane_list_json: &str, pane_id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The suffix a preview tab's label carries. Both previewers build it --
+/// `viewer::preview_pane_label` for the builtin one, `neovim::preview_tab_label`
+/// for the nvim one -- and a tab wearing it exists to show one document.
+pub const PREVIEW_TAB_SUFFIX: &str = " \u{b7} preview";
+
+/// The label herdr shows on a tab; empty when the tab is not in the list.
+pub fn tab_label(tab_list_json: &str, tab_id: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(strip_bom(tab_list_json)) else {
+        return String::new();
+    };
+    let Some(tabs) = value.pointer("/result/tabs").and_then(|t| t.as_array()) else {
+        return String::new();
+    };
+    tabs.iter()
+        .find(|t| t.get("tab_id").and_then(serde_json::Value::as_str) == Some(tab_id))
+        .and_then(|t| t.get("label"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// True when `pane_id` is the only pane in its tab.
+pub fn alone_in_tab(pane_list_json: &str, pane_id: &str) -> bool {
+    let tab = tab_of(pane_list_json, pane_id);
+    if tab.is_empty() {
+        return false;
+    }
+    let Ok(msg) = serde_json::from_str::<PaneListMsg>(strip_bom(pane_list_json)) else {
+        return false;
+    };
+    msg.result
+        .panes
+        .iter()
+        .filter(|p| p.tab_id.as_deref() == Some(tab.as_str()))
+        .count()
+        == 1
+}
+
+/// True when `pane_id` is the last pane left in a preview tab.
+///
+/// The editor pane such a tab was built around is gone -- the user quit nvim,
+/// or closed the viewer -- and herdr hands the whole tab to whatever is left,
+/// so the sidebar stretches across the window. The tab cannot be reused for
+/// the next click either: `neovim::preview_tab_in` wants an editor pane in it,
+/// and finding none it builds a second preview tab beside this one. Closing
+/// the last pane closes the tab.
+///
+/// Being alone in the tab is required, not just an absent editor: a preview
+/// tab the user has since split something else into is a tab the user is
+/// working in.
+pub fn orphaned_preview_tab(pane_list_json: &str, tab_list_json: &str, pane_id: &str) -> bool {
+    alone_in_tab(pane_list_json, pane_id)
+        && tab_label(tab_list_json, &tab_of(pane_list_json, pane_id))
+            .ends_with(PREVIEW_TAB_SUFFIX)
+}
+
 /// All tab ids present in a `pane list` JSON — the live-tab set the snooze
 /// cleanup checks markers against.
 pub fn live_tabs(pane_list_json: &str) -> std::collections::BTreeSet<String> {
@@ -1027,6 +1083,67 @@ mod tests {
 
     fn pane_list(panes: &str) -> String {
         format!(r#"{{"id":"cli:pane:list","result":{{"panes":[{panes}]}}}}"#)
+    }
+
+    fn tab_list(tabs: &str) -> String {
+        format!(r#"{{"id":"cli:tab:list","result":{{"tabs":[{tabs}]}}}}"#)
+    }
+
+    /// The state problem 1 produced: nvim quit, the sidebar is alone in the
+    /// preview tab and herdr has stretched it across the window.
+    #[test]
+    fn a_preview_tab_left_holding_only_the_sidebar_is_an_orphan() {
+        let panes = pane_list(
+            r#"{"pane_id":"w1:p2","tab_id":"w1:t2","label":"Sidebar"},
+               {"pane_id":"w1:p1","tab_id":"w1:t1"}"#,
+        );
+        let tabs = tab_list(
+            r#"{"tab_id":"w1:t2","label":"README.md · preview"},
+               {"tab_id":"w1:t1","label":"1"}"#,
+        );
+        assert!(orphaned_preview_tab(&panes, &tabs, "w1:p2"));
+    }
+
+    #[test]
+    fn a_preview_tab_that_still_holds_its_editor_is_left_alone() {
+        let panes = pane_list(
+            r#"{"pane_id":"w1:p2","tab_id":"w1:t2","label":"Sidebar"},
+               {"pane_id":"w1:p3","tab_id":"w1:t2","label":"nvim sidebar"}"#,
+        );
+        let tabs = tab_list(r#"{"tab_id":"w1:t2","label":"README.md · preview"}"#);
+        assert!(!orphaned_preview_tab(&panes, &tabs, "w1:p2"));
+    }
+
+    /// A preview tab the user has since split something else into is a tab the
+    /// user is working in, editor pane or not.
+    #[test]
+    fn a_preview_tab_the_user_split_into_is_left_alone() {
+        let panes = pane_list(
+            r#"{"pane_id":"w1:p2","tab_id":"w1:t2","label":"Sidebar"},
+               {"pane_id":"w1:p9","tab_id":"w1:t2"}"#,
+        );
+        let tabs = tab_list(r#"{"tab_id":"w1:t2","label":"README.md · preview"}"#);
+        assert!(!orphaned_preview_tab(&panes, &tabs, "w1:p2"));
+    }
+
+    /// The ordinary case: a working tab whose only pane is the sidebar,
+    /// because the user closed everything else. Never touched.
+    #[test]
+    fn a_working_tab_with_only_a_sidebar_in_it_is_not_an_orphan() {
+        let panes = pane_list(r#"{"pane_id":"w1:p2","tab_id":"w1:t1","label":"Sidebar"}"#);
+        let tabs = tab_list(r#"{"tab_id":"w1:t1","label":"messaging"}"#);
+        assert!(!orphaned_preview_tab(&panes, &tabs, "w1:p2"));
+        assert!(alone_in_tab(&panes, "w1:p2"));
+    }
+
+    #[test]
+    fn garbage_json_and_unknown_panes_never_report_an_orphan() {
+        let tabs = tab_list(r#"{"tab_id":"w1:t2","label":"README.md · preview"}"#);
+        assert!(!orphaned_preview_tab("not json", &tabs, "w1:p2"));
+        let panes = pane_list(r#"{"pane_id":"w1:p2","tab_id":"w1:t2","label":"Sidebar"}"#);
+        assert!(!orphaned_preview_tab(&panes, "not json", "w1:p2"));
+        assert!(!orphaned_preview_tab(&panes, &tabs, "w1:p404"));
+        assert!(!alone_in_tab(&panes, "w1:p404"));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::icons::IconTheme;
@@ -381,6 +381,38 @@ pub fn draw_scrollbar(frame: &mut Frame, area: Rect, total: usize, viewport: usi
         area,
         &mut state,
     );
+}
+
+/// Terminal columns a collapsed sidebar asks for.
+///
+/// It rarely gets them: herdr clamps a split at a tenth of the tab, measured
+/// 2026-09-10 as a hard floor of ratio 0.9 that four resize requests in a row
+/// could not move. On a 164-column window that floor is 16 columns. Asking
+/// for 4 is how the pane reaches the floor whatever the window is, so the
+/// number is a request, not the resulting width -- which is also why the
+/// collapsed state is a stored flag rather than a width test.
+pub const COLLAPSED_COLS: u16 = 4;
+
+/// Draw the collapsed strip: what view is hiding here at the top, and the
+/// chevron that brings it back at the bottom, in the same corner the `«`
+/// collapse button sat in before the pane shrank.
+pub fn draw_collapsed_strip(frame: &mut Frame, area: Rect, icon: &str) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let colors = palette();
+    let style = Style::default().fg(colors.keycap_fg);
+    let mut lines = vec![Line::from(Span::styled(format!(" {icon}"), style))];
+    while lines.len() + 1 < area.height as usize {
+        lines.push(Line::from(""));
+    }
+    if lines.len() < area.height as usize {
+        lines.push(Line::from(Span::styled(
+            " \u{bb}",
+            style.add_modifier(Modifier::BOLD),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// True when a click at pane-local (column, row) lands on the `«` collapse

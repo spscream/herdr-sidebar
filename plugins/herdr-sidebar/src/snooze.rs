@@ -41,3 +41,19 @@ pub fn sweep(dir: &std::path::Path, live_tabs: &std::collections::BTreeSet<Strin
         }
     }
 }
+
+/// Snooze this pane's tab, then close the pane.
+///
+/// The sidebar pane is an ordinary shell that `ensure::open` told to run the
+/// TUI, so a TUI that merely exits leaves a bare prompt sitting where the
+/// sidebar was. Every exit that means "the user is done with this sidebar"
+/// goes through here.
+pub fn hide_pane(pane_id: &str) {
+    if pane_id.is_empty() {
+        return;
+    }
+    if let Ok(json) = crate::ipc::call_text("pane.list", serde_json::json!({})) {
+        set(&dir(), &crate::launch::tab_of(&json, pane_id));
+    }
+    let _ = crate::ipc::call_text("pane.close", serde_json::json!({ "pane_id": pane_id }));
+}
