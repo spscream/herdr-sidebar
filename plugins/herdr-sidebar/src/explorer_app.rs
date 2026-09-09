@@ -591,6 +591,11 @@ impl App {
     /// spawns one next to us.
     fn open_preview(&mut self, path: &Path) {
         if self.sidebar_state.preview_editor == herdr_sidebar::state::PreviewEditor::Neovim {
+            // Forget the builtin viewer's last tab. It belongs to the other
+            // editor, and the double-click branch matches on the doc key
+            // alone: left in place, a second click on a file previewed before
+            // the switch would pin that stale tab and never reach nvim.
+            self.last_preview = None;
             if let Err(e) = herdr_sidebar::neovim::open(path) {
                 self.notice = Some(e);
             }
