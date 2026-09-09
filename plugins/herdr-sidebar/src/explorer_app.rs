@@ -210,6 +210,7 @@ enum Setting {
     IconTheme,
     ColorTheme,
     PreviewPlacement,
+    PreviewEditor,
     AutoOpen,
     StrictToggle,
     FocusOnOpen,
@@ -589,6 +590,12 @@ impl App {
     /// visible): the shared viewer client reuses the tab's viewer pane or
     /// spawns one next to us.
     fn open_preview(&mut self, path: &Path) {
+        if self.sidebar_state.preview_editor == herdr_sidebar::state::PreviewEditor::Neovim {
+            if let Err(e) = herdr_sidebar::neovim::open(path) {
+                self.notice = Some(e);
+            }
+            return;
+        }
         let Some(pane_id) = self.pane_ctl.as_ref().map(|c| c.pane_id.clone()) else {
             self.notice = Some("preview needs a herdr pane".into());
             return;
@@ -1344,6 +1351,12 @@ impl App {
                 true,
             ),
             (
+                Setting::PreviewEditor,
+                "Preview editor",
+                self.sidebar_state.preview_editor.label().to_string(),
+                true,
+            ),
+            (
                 Setting::HiddenFiles,
                 "Hidden files",
                 if self.tree.show_hidden {
@@ -1453,6 +1466,11 @@ impl App {
             Setting::PreviewPlacement => {
                 self.sidebar_state = sidebar::update_state(|state| {
                     state.preview_placement = state.preview_placement.other();
+                });
+            }
+            Setting::PreviewEditor => {
+                self.sidebar_state = sidebar::update_state(|state| {
+                    state.preview_editor = state.preview_editor.other();
                 });
             }
             Setting::HiddenFiles => {

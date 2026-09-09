@@ -224,6 +224,41 @@ impl PreviewPlacement {
     }
 }
 
+/// Which editor renders a clicked file. `Builtin` is the sidebar's own
+/// read-only/editable viewer; `Neovim` hands the path to the `chmarax.herdr-nvim`
+/// plugin's sidebar instead, so a click lands in the user's real editor.
+/// Only plain file clicks take this fork — diffs and `git show` always use
+/// the builtin viewer, since `herdr-nvim` has no diff view to hand them to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PreviewEditor {
+    Builtin,
+    Neovim,
+}
+
+impl PreviewEditor {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Neovim => "neovim",
+        }
+    }
+
+    pub fn other(self) -> Self {
+        match self {
+            Self::Builtin => Self::Neovim,
+            Self::Neovim => Self::Builtin,
+        }
+    }
+
+    fn from_state_name(name: &str) -> Option<Self> {
+        match name {
+            "builtin" => Some(Self::Builtin),
+            "neovim" => Some(Self::Neovim),
+            _ => None,
+        }
+    }
+}
+
 /// The sticky sidebar setting, shared by both plugins.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct State {
@@ -271,6 +306,9 @@ pub struct State {
     /// Whether a clicked file opens in its own tab or in a viewer pane beside
     /// the sidebar, inside the tab the click came from.
     pub preview_placement: PreviewPlacement,
+    /// Which editor a plain file click opens in: the builtin viewer or the
+    /// `chmarax.herdr-nvim` sidebar.
+    pub preview_editor: PreviewEditor,
 }
 
 impl Default for State {
@@ -290,6 +328,7 @@ impl Default for State {
             dock_right: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             preview_placement: PreviewPlacement::Tab,
+            preview_editor: PreviewEditor::Builtin,
         }
     }
 }
@@ -426,7 +465,7 @@ fn write_state(path: &Path, state: State) {
         None => String::new(),
     };
     let json = format!(
-        "{{\"merged\":{},\"active\":\"{}\",\"hotkeys\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\"{icons}}}",
+        "{{\"merged\":{},\"active\":\"{}\",\"hotkeys\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\",\"preview_editor\":\"{}\"{icons}}}",
         state.merged,
         state.active.state_name(),
         state.show_hotkeys,
@@ -439,7 +478,8 @@ fn write_state(path: &Path, state: State) {
         state.dock_right,
         clamp_sidebar_width(state.sidebar_width),
         state.color_theme.label(),
-        state.preview_placement.label()
+        state.preview_placement.label(),
+        state.preview_editor.label()
     );
     let _ = std::fs::write(path, json);
 }
@@ -875,6 +915,11 @@ pub fn parse_state(json: &str) -> State {
             .and_then(|v| v.as_str())
             .and_then(PreviewPlacement::from_state_name)
             .unwrap_or(default.preview_placement),
+        preview_editor: value
+            .get("preview_editor")
+            .and_then(|v| v.as_str())
+            .and_then(PreviewEditor::from_state_name)
+            .unwrap_or(default.preview_editor),
     }
 }
 
@@ -1015,8 +1060,9 @@ mod tests {
             dock_right: true,
             sidebar_width: 44,
             preview_placement: PreviewPlacement::Pane,
+            preview_editor: PreviewEditor::Neovim,
         };
-        let json = "{\"merged\":true,\"active\":\"source-control\",\"hotkeys\":true,\"font_prompt\":true,\"auto_open\":false,\"strict_toggle\":true,\"focus_on_open\":false,\"follow_cwd\":false,\"git_deco\":false,\"dock_right\":true,\"sidebar_width\":44,\"colors\":\"terminal\",\"preview_placement\":\"pane\",\"icons\":\"emoji\"}";
+        let json = "{\"merged\":true,\"active\":\"source-control\",\"hotkeys\":true,\"font_prompt\":true,\"auto_open\":false,\"strict_toggle\":true,\"focus_on_open\":false,\"follow_cwd\":false,\"git_deco\":false,\"dock_right\":true,\"sidebar_width\":44,\"colors\":\"terminal\",\"preview_placement\":\"pane\",\"preview_editor\":\"neovim\",\"icons\":\"emoji\"}";
         assert_eq!(parse_state(json), state);
         assert!(parse_state("\u{feff}{\"merged\":true}").merged);
         // Files written before the flag existed keep auto-open AND the git
@@ -1070,6 +1116,16 @@ mod tests {
         assert_eq!(
             parse_state("{\"preview_placement\":\"nonsense\"}").preview_placement,
             PreviewPlacement::Tab
+        );
+        // Files written before the preview-editor setting existed keep the
+        // historical behavior: the builtin viewer.
+        assert_eq!(
+            parse_state("{\"merged\":true}").preview_editor,
+            PreviewEditor::Builtin
+        );
+        assert_eq!(
+            parse_state("{\"preview_editor\":\"nonsense\"}").preview_editor,
+            PreviewEditor::Builtin
         );
         assert_eq!(parse_state("garbage"), State::default());
         assert_eq!(parse_state("{\"active\":\"bogus\"}"), State::default());

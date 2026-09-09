@@ -14,6 +14,7 @@ pub mod gitdeco;
 pub mod icons;
 pub mod ipc;
 pub mod launch;
+pub mod neovim;
 pub mod snooze;
 pub mod state;
 pub mod suggest;
