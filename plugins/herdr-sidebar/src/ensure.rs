@@ -10,10 +10,10 @@ use crate::{ipc, launch};
 /// Serialize concurrent runs (pane/tab events arrive in bursts; unguarded,
 /// one switch opened four panes).
 /// Losing the race skips this run; the next event re-fires it.
-struct Lock(PathBuf);
+pub(crate) struct Lock(PathBuf);
 
 impl Lock {
-    fn acquire(wait: bool) -> Option<Self> {
+    pub(crate) fn acquire(wait: bool) -> Option<Self> {
         let dir = std::env::temp_dir().join("herdr-sidebar-ensure.lock");
         let attempts = if wait { 20 } else { 0 };
         for attempt in 0..=attempts {
